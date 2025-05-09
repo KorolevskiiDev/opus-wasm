@@ -1,1 +1,1 @@
-Another way to user opus codec in browser
+Another way to use opus codec in browser
