@@ -1,0 +1,21 @@
+{
+  "name": "opus-library",
+  "version": "1.0.0",
+  "description": "A library wrapping the opus encoder/decoder",
+  "main": "opusWrapper.js",
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/P4elme6ka/repository-name.git"
+  },
+  "keywords": [
+    "opus",
+    "audio",
+    "encoder",
+    "decoder",
+    "wasm"
+  ],
+  "author": "Me",
+  "license": "MIT",
+  "dependencies": {}
+}

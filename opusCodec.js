@@ -31,22 +31,17 @@ var readyPromise = new Promise((resolve, reject) => {
 // Determine the runtime environment we are in. You can customize this by
 // setting the ENVIRONMENT setting at compile time (see settings.js).
 
+var ENVIRONMENT_IS_AUDIO_WORKLET = typeof AudioWorkletGlobalScope !== 'undefined';
+
 // Attempt to auto-detect the environment
 var ENVIRONMENT_IS_WEB = typeof window == 'object';
 var ENVIRONMENT_IS_WORKER = typeof WorkerGlobalScope != 'undefined';
 // N.b. Electron.js environment is simultaneously a NODE-environment, but
 // also a web environment.
 var ENVIRONMENT_IS_NODE = typeof process == 'object' && typeof process.versions == 'object' && typeof process.versions.node == 'string' && process.type != 'renderer';
-var ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIRONMENT_IS_WORKER;
+var ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIRONMENT_IS_WORKER && !ENVIRONMENT_IS_AUDIO_WORKLET;
 
-if (ENVIRONMENT_IS_NODE) {
-  // When building an ES module `require` is not normally available.
-  // We need to use `createRequire()` to construct the require()` function.
-  const { createRequire } = await import('module');
-  /** @suppress{duplicate} */
-  var require = createRequire(import.meta.url);
-
-}
+var ENVIRONMENT_IS_WASM_WORKER = !!Module['$ww'];
 
 // --pre-jses are emitted after the Module integration code, so that they can
 // refer to Module (if they choose; they can also define Module)
@@ -77,60 +72,6 @@ function locateFile(path) {
 // Hooks that are implemented differently in different runtime environments.
 var readAsync, readBinary;
 
-if (ENVIRONMENT_IS_NODE) {
-  if (typeof process == 'undefined' || !process.release || process.release.name !== 'node') throw new Error('not compiled for this environment (did you build to HTML and try to run it not on the web, or set ENVIRONMENT to something - like node - and run it someplace else - like on the web?)');
-
-  var nodeVersion = process.versions.node;
-  var numericVersion = nodeVersion.split('.').slice(0, 3);
-  numericVersion = (numericVersion[0] * 10000) + (numericVersion[1] * 100) + (numericVersion[2].split('-')[0] * 1);
-  var minVersion = 160000;
-  if (numericVersion < 160000) {
-    throw new Error('This emscripten-generated code requires node v16.0.0 (detected v' + nodeVersion + ')');
-  }
-
-  // These modules will usually be used on Node.js. Load them eagerly to avoid
-  // the complexity of lazy-loading.
-  var fs = require('fs');
-  var nodePath = require('path');
-
-  // EXPORT_ES6 + ENVIRONMENT_IS_NODE always requires use of import.meta.url,
-  // since there's no way getting the current absolute path of the module when
-  // support for that is not available.
-  if (!import.meta.url.startsWith('data:')) {
-    scriptDirectory = nodePath.dirname(require('url').fileURLToPath(import.meta.url)) + '/';
-  }
-
-// include: node_shell_read.js
-readBinary = (filename) => {
-  // We need to re-wrap `file://` strings to URLs.
-  filename = isFileURI(filename) ? new URL(filename) : filename;
-  var ret = fs.readFileSync(filename);
-  assert(Buffer.isBuffer(ret));
-  return ret;
-};
-
-readAsync = async (filename, binary = true) => {
-  // See the comment in the `readBinary` function.
-  filename = isFileURI(filename) ? new URL(filename) : filename;
-  var ret = fs.readFileSync(filename, binary ? undefined : 'utf8');
-  assert(binary ? Buffer.isBuffer(ret) : typeof ret == 'string');
-  return ret;
-};
-// end include: node_shell_read.js
-  if (!Module['thisProgram'] && process.argv.length > 1) {
-    thisProgram = process.argv[1].replace(/\\/g, '/');
-  }
-
-  arguments_ = process.argv.slice(2);
-
-  // MODULARIZE will export the module in the proper place outside, we don't need to export here
-
-  quit_ = (status, toThrow) => {
-    process.exitCode = status;
-    throw toThrow;
-  };
-
-} else
 if (ENVIRONMENT_IS_SHELL) {
 
   if ((typeof process == 'object' && typeof require === 'function') || typeof window == 'object' || typeof WorkerGlobalScope != 'undefined') throw new Error('not compiled for this environment (did you build to HTML and try to run it not on the web, or set ENVIRONMENT to something - like node - and run it someplace else - like on the web?)');
@@ -178,26 +119,7 @@ if (ENVIRONMENT_IS_WORKER) {
   }
 
   readAsync = async (url) => {
-    // Fetch has some additional restrictions over XHR, like it can't be used on a file:// url.
-    // See https://github.com/github/fetch/pull/92#issuecomment-140665932
-    // Cordova or Electron apps are typically loaded from a file:// url.
-    // So use XHR on webview if URL is a file URL.
-    if (isFileURI(url)) {
-      return new Promise((resolve, reject) => {
-        var xhr = new XMLHttpRequest();
-        xhr.open('GET', url, true);
-        xhr.responseType = 'arraybuffer';
-        xhr.onload = () => {
-          if (xhr.status == 200 || (xhr.status == 0 && xhr.response)) { // file URLs can return 0
-            resolve(xhr.response);
-            return;
-          }
-          reject(xhr.status);
-        };
-        xhr.onerror = reject;
-        xhr.send(null);
-      });
-    }
+    assert(!isFileURI(url), "readAsync does not work with file:// URLs");
     var response = await fetch(url, { credentials: 'same-origin' });
     if (response.ok) {
       return response.arrayBuffer();
@@ -207,6 +129,7 @@ if (ENVIRONMENT_IS_WORKER) {
 // end include: web_or_worker_shell_read.js
   }
 } else
+if (!ENVIRONMENT_IS_AUDIO_WORKLET)
 {
   throw new Error('environment detection error');
 }
@@ -255,6 +178,8 @@ var OPFS = 'OPFS is no longer included by default; build with -lopfs.js';
 
 var NODEFS = 'NODEFS is no longer included by default; build with -lnodefs.js';
 
+assert(!ENVIRONMENT_IS_NODE, 'node environment detected but not enabled at build time.  Add `node` to `-sENVIRONMENT` to enable.');
+
 assert(!ENVIRONMENT_IS_SHELL, 'shell environment detected but not enabled at build time.  Add `shell` to `-sENVIRONMENT` to enable.');
 
 // end include: shell.js
@@ -279,6 +204,9 @@ if (typeof WebAssembly != 'object') {
 // Wasm globals
 
 var wasmMemory;
+
+// For sending to workers.
+var wasmModule;
 
 //========================================
 // Runtime essentials
@@ -306,13 +234,6 @@ function assert(condition, text) {
 
 // We used to include malloc/free by default in the past. Show a helpful error in
 // builds with assertions.
-function _malloc() {
-  abort('malloc() called but not included in the build - add `_malloc` to EXPORTED_FUNCTIONS');
-}
-function _free() {
-  // Show a helpful error since we used to include free by default in the past.
-  abort('free() called but not included in the build - add `_free` to EXPORTED_FUNCTIONS');
-}
 
 // Memory management
 
@@ -545,9 +466,30 @@ assert(!Module['STACK_SIZE'], 'STACK_SIZE can no longer be set at runtime.  Use 
 assert(typeof Int32Array != 'undefined' && typeof Float64Array !== 'undefined' && Int32Array.prototype.subarray != undefined && Int32Array.prototype.set != undefined,
        'JS engine does not provide full typed array support');
 
-// If memory is defined in wasm, the user can't provide it, or set INITIAL_MEMORY
-assert(!Module['wasmMemory'], 'Use of `wasmMemory` detected.  Use -sIMPORTED_MEMORY to define wasmMemory externally');
-assert(!Module['INITIAL_MEMORY'], 'Detected runtime INITIAL_MEMORY setting.  Use -sIMPORTED_MEMORY to define wasmMemory dynamically');
+// In non-standalone/normal mode, we create the memory here.
+// include: runtime_init_memory.js
+// Create the wasm memory. (Note: this only applies if IMPORTED_MEMORY is defined)
+
+// check for full engine support (use string 'subarray' to avoid closure compiler confusion)
+
+  if (Module['wasmMemory']) {
+    wasmMemory = Module['wasmMemory'];
+  } else
+  {
+    var INITIAL_MEMORY = Module['INITIAL_MEMORY'] || 16777216;legacyModuleProp('INITIAL_MEMORY', 'INITIAL_MEMORY');
+
+    assert(INITIAL_MEMORY >= 65536, 'INITIAL_MEMORY should be larger than STACK_SIZE, was ' + INITIAL_MEMORY + '! (STACK_SIZE=' + 65536 + ')');
+    /** @suppress {checkTypes} */
+    wasmMemory = new WebAssembly.Memory({
+      'initial': INITIAL_MEMORY / 65536,
+      'maximum': INITIAL_MEMORY / 65536,
+      'shared': true,
+    });
+  }
+
+  updateMemoryViews();
+
+// end include: runtime_init_memory.js
 
 function preRun() {
   if (Module['preRun']) {
@@ -563,6 +505,8 @@ function preRun() {
 function initRuntime() {
   assert(!runtimeInitialized);
   runtimeInitialized = true;
+
+  if (ENVIRONMENT_IS_WASM_WORKER) return _wasmWorkerInitializeRuntime();
 
   checkStackCookie();
 
@@ -732,11 +676,7 @@ function createExportWrapper(name, nargs) {
 var wasmBinaryFile;
 
 function findWasmBinary() {
-  if (Module['locateFile']) {
     return locateFile('opusCodec.wasm');
-  }
-  // Use bundler-friendly `new URL(..., import.meta.url)` pattern; works in browsers too.
-  return new URL('opusCodec.wasm', import.meta.url).href;
 }
 
 function getBinarySync(file) {
@@ -783,15 +723,6 @@ async function instantiateArrayBuffer(binaryFile, imports) {
 
 async function instantiateAsync(binary, binaryFile, imports) {
   if (!binary && typeof WebAssembly.instantiateStreaming == 'function'
-      // Don't use streaming for file:// delivered objects in a webview, fetch them synchronously.
-      && !isFileURI(binaryFile)
-      // Avoid instantiateStreaming() on Node.js environment for now, as while
-      // Node.js v18.1.0 implements it, it does not have a full fetch()
-      // implementation yet.
-      //
-      // Reference:
-      //   https://github.com/emscripten-core/emscripten/pull/16917
-      && !ENVIRONMENT_IS_NODE
      ) {
     try {
       var response = fetch(binaryFile, { credentials: 'same-origin' });
@@ -828,11 +759,12 @@ async function createWasm() {
 
     
 
-    wasmMemory = wasmExports['memory'];
-    
-    assert(wasmMemory, 'memory not found in wasm exports');
-    updateMemoryViews();
+    wasmTable = wasmExports['__indirect_function_table'];
+    Module['wasmTable'] = wasmTable;
+    assert(wasmTable, 'table not found in wasm exports');
 
+    // We now have the Wasm module loaded up, keep a reference to the compiled module so we can post it to the workers.
+    wasmModule = module;
     removeRunDependency('wasm-instantiate');
     return wasmExports;
   }
@@ -849,9 +781,7 @@ async function createWasm() {
     // receiveInstance() will swap in the exports (to Module.asm) so they can be called
     assert(Module === trueModule, 'the Module object should not be replaced during async compilation - perhaps the order of HTML elements is wrong?');
     trueModule = null;
-    // TODO: Due to Closure regression https://github.com/google/closure-compiler/issues/3193, the above line no longer optimizes out down to the following line.
-    // When the regression is fixed, can restore the above PTHREADS-enabled path.
-    return receiveInstance(result['instance']);
+    return receiveInstance(result['instance'], result['module']);
   }
 
   var info = getWasmImports();
@@ -900,6 +830,136 @@ async function createWasm() {
         this.status = status;
       }
     }
+
+  var _wasmWorkerDelayedMessageQueue = [];
+  
+  var handleException = (e) => {
+      // Certain exception types we do not treat as errors since they are used for
+      // internal control flow.
+      // 1. ExitStatus, which is thrown by exit()
+      // 2. "unwind", which is thrown by emscripten_unwind_to_js_event_loop() and others
+      //    that wish to return to JS event loop.
+      if (e instanceof ExitStatus || e == 'unwind') {
+        return EXITSTATUS;
+      }
+      checkStackCookie();
+      if (e instanceof WebAssembly.RuntimeError) {
+        if (_emscripten_stack_get_current() <= 0) {
+          err('Stack overflow detected.  You can try increasing -sSTACK_SIZE (currently set to 65536)');
+        }
+      }
+      quit_(1, e);
+    };
+  
+  
+  var runtimeKeepaliveCounter = 0;
+  var keepRuntimeAlive = () => noExitRuntime || runtimeKeepaliveCounter > 0;
+  var _proc_exit = (code) => {
+      EXITSTATUS = code;
+      if (!keepRuntimeAlive()) {
+        Module['onExit']?.(code);
+        ABORT = true;
+      }
+      quit_(code, new ExitStatus(code));
+    };
+  
+  
+  /** @suppress {duplicate } */
+  /** @param {boolean|number=} implicit */
+  var exitJS = (status, implicit) => {
+      EXITSTATUS = status;
+  
+      checkUnflushedContent();
+  
+      // if exit() was called explicitly, warn the user if the runtime isn't actually being shut down
+      if (keepRuntimeAlive() && !implicit) {
+        var msg = `program exited (with status: ${status}), but keepRuntimeAlive() is set (counter=${runtimeKeepaliveCounter}) due to an async operation, so halting execution but not exiting the runtime or preventing further async execution (you can use emscripten_force_exit, if you want to force a true shutdown)`;
+        readyPromiseReject(msg);
+        err(msg);
+      }
+  
+      _proc_exit(status);
+    };
+  var _exit = exitJS;
+  
+  
+  var maybeExit = () => {
+      if (!keepRuntimeAlive()) {
+        try {
+          _exit(EXITSTATUS);
+        } catch (e) {
+          handleException(e);
+        }
+      }
+    };
+  var callUserCallback = (func) => {
+      if (ABORT) {
+        err('user callback triggered after runtime exited or application aborted.  Ignoring.');
+        return;
+      }
+      try {
+        func();
+        maybeExit();
+      } catch (e) {
+        handleException(e);
+      }
+    };
+  
+  var wasmTableMirror = [];
+  
+  /** @type {WebAssembly.Table} */
+  var wasmTable;
+  var getWasmTableEntry = (funcPtr) => {
+      var func = wasmTableMirror[funcPtr];
+      if (!func) {
+        /** @suppress {checkTypes} */
+        wasmTableMirror[funcPtr] = func = wasmTable.get(funcPtr);
+      }
+      /** @suppress {checkTypes} */
+      assert(wasmTable.get(funcPtr) == func, 'JavaScript-side Wasm function table mirror is out of date!');
+      return func;
+    };
+  var _wasmWorkerRunPostMessage = (e) => {
+      // '_wsc' is short for 'wasm call', trying to use an identifier name that
+      // will never conflict with user code
+      let data = e.data;
+      let wasmCall = data['_wsc'];
+      wasmCall && callUserCallback(() => getWasmTableEntry(wasmCall)(...data['x']));
+    };
+  
+  var _wasmWorkerAppendToQueue = (e) => {
+      _wasmWorkerDelayedMessageQueue.push(e);
+    };
+  
+  var _wasmWorkerInitializeRuntime = () => {
+      let m = Module;
+      assert(m['sb'] % 16 == 0);
+      assert(m['sz'] % 16 == 0);
+  
+      // Wasm workers basically never exit their runtime
+      noExitRuntime = 1;
+  
+      // Run the C side Worker initialization for stack and TLS.
+      __emscripten_wasm_worker_initialize(m['sb'], m['sz']);
+  
+      // Write the stack cookie last, after we have set up the proper bounds and
+      // current position of the stack.
+      writeStackCookie();
+  
+      // Audio Worklets do not have postMessage()ing capabilities.
+      if (typeof AudioWorkletGlobalScope === 'undefined') {
+        // The Wasm Worker runtime is now up, so we can start processing
+        // any postMessage function calls that have been received. Drop the temp
+        // message handler that queued any pending incoming postMessage function calls ...
+        removeEventListener('message', _wasmWorkerAppendToQueue);
+        // ... then flush whatever messages we may have already gotten in the queue,
+        //     and clear _wasmWorkerDelayedMessageQueue to undefined ...
+        _wasmWorkerDelayedMessageQueue = _wasmWorkerDelayedMessageQueue.forEach(_wasmWorkerRunPostMessage);
+        // ... and finally register the proper postMessage handler that immediately
+        // dispatches incoming function calls without queueing them.
+        addEventListener('message', _wasmWorkerRunPostMessage);
+      }
+    };
 
   var callRuntimeCallbacks = (callbacks) => {
       while (callbacks.length > 0) {
@@ -972,13 +1032,9 @@ async function createWasm() {
       warnOnce.shown ||= {};
       if (!warnOnce.shown[text]) {
         warnOnce.shown[text] = 1;
-        if (ENVIRONMENT_IS_NODE) text = 'warning: ' + text;
         err(text);
       }
     };
-
-  var __abort_js = () =>
-      abort('native code called abort()');
 
   var UTF8Decoder = typeof TextDecoder != 'undefined' ? new TextDecoder() : undefined;
   
@@ -1002,7 +1058,7 @@ async function createWasm() {
       while (heapOrArray[endPtr] && !(endPtr >= endIdx)) ++endPtr;
   
       if (endPtr - idx > 16 && heapOrArray.buffer && UTF8Decoder) {
-        return UTF8Decoder.decode(heapOrArray.subarray(idx, endPtr));
+        return UTF8Decoder.decode(heapOrArray.buffer instanceof ArrayBuffer ? heapOrArray.subarray(idx, endPtr) : heapOrArray.slice(idx, endPtr));
       }
       var str = '';
       // If building with TextDecoder, we have already computed the string length
@@ -1053,7 +1109,25 @@ async function createWasm() {
       assert(typeof ptr == 'number', `UTF8ToString expects a number (got ${typeof ptr})`);
       return ptr ? UTF8ArrayToString(HEAPU8, ptr, maxBytesToRead) : '';
     };
+  var ___assert_fail = (condition, filename, line, func) =>
+      abort(`Assertion failed: ${UTF8ToString(condition)}, at: ` + [filename ? UTF8ToString(filename) : 'unknown filename', line, func ? UTF8ToString(func) : 'unknown function']);
+
+  var __abort_js = () =>
+      abort('native code called abort()');
+
   var _emscripten_err = (str) => err(UTF8ToString(str));
+
+  var _emscripten_get_now;
+      // AudioWorkletGlobalScope does not have performance.now()
+      // (https://github.com/WebAudio/web-audio-api/issues/2527), so if building
+      // with
+      // Audio Worklets enabled, do a dynamic check for its presence.
+      if (typeof performance != 'undefined' && performance.now) {
+        _emscripten_get_now = () => performance.now();
+      } else {
+        _emscripten_get_now = Date.now;
+      }
+  ;
 
   var abortOnCannotGrowMemory = (requestedSize) => {
       abort(`Cannot enlarge memory arrays to size ${requestedSize} bytes (OOM). Either (1) compile with -sINITIAL_MEMORY=X with X higher than the current value ${HEAP8.length}, (2) compile with -sALLOW_MEMORY_GROWTH which allows increasing the size at runtime, or (3) if you want malloc to return NULL (0) instead of this abort, compile with -sABORTING_MALLOC=0`);
@@ -1286,6 +1360,11 @@ async function createWasm() {
   var cwrap = (ident, returnType, argTypes, opts) => {
       return (...args) => ccall(ident, returnType, argTypes, args, opts);
     };
+
+
+
+
+
 // End JS library code
 
 function checkIncomingModuleAPI() {
@@ -1293,9 +1372,13 @@ function checkIncomingModuleAPI() {
 }
 var wasmImports = {
   /** @export */
+  __assert_fail: ___assert_fail,
+  /** @export */
   _abort_js: __abort_js,
   /** @export */
   emscripten_err: _emscripten_err,
+  /** @export */
+  emscripten_get_now: _emscripten_get_now,
   /** @export */
   emscripten_resize_heap: _emscripten_resize_heap,
   /** @export */
@@ -1303,15 +1386,20 @@ var wasmImports = {
   /** @export */
   fd_seek: _fd_seek,
   /** @export */
-  fd_write: _fd_write
+  fd_write: _fd_write,
+  /** @export */
+  memory: wasmMemory
 };
 var wasmExports = await createWasm();
 var ___wasm_call_ctors = createExportWrapper('__wasm_call_ctors', 0);
+var _opus_strerror = Module['_opus_strerror'] = createExportWrapper('opus_strerror', 1);
 var _opus_decoder_create = Module['_opus_decoder_create'] = createExportWrapper('opus_decoder_create', 3);
-var _opus_decode = Module['_opus_decode'] = createExportWrapper('opus_decode', 6);
+var _malloc = Module['_malloc'] = createExportWrapper('malloc', 1);
+var _free = Module['_free'] = createExportWrapper('free', 1);
+var _opus_decode_float = Module['_opus_decode_float'] = createExportWrapper('opus_decode_float', 6);
 var _opus_decoder_destroy = Module['_opus_decoder_destroy'] = createExportWrapper('opus_decoder_destroy', 1);
 var _opus_encoder_create = Module['_opus_encoder_create'] = createExportWrapper('opus_encoder_create', 4);
-var _opus_encode = Module['_opus_encode'] = createExportWrapper('opus_encode', 5);
+var _opus_encode_float = Module['_opus_encode_float'] = createExportWrapper('opus_encode_float', 5);
 var _opus_encoder_destroy = Module['_opus_encoder_destroy'] = createExportWrapper('opus_encoder_destroy', 1);
 var _fflush = createExportWrapper('fflush', 1);
 var _strerror = createExportWrapper('strerror', 1);
@@ -1322,13 +1410,19 @@ var _emscripten_stack_get_end = wasmExports['emscripten_stack_get_end']
 var __emscripten_stack_restore = wasmExports['_emscripten_stack_restore']
 var __emscripten_stack_alloc = wasmExports['_emscripten_stack_alloc']
 var _emscripten_stack_get_current = wasmExports['emscripten_stack_get_current']
+var __emscripten_wasm_worker_initialize = createExportWrapper('_emscripten_wasm_worker_initialize', 2);
 
 
 // include: postamble.js
 // === Auto-generated postamble setup entry stuff ===
 
+Module['stackSave'] = stackSave;
+Module['stackRestore'] = stackRestore;
+Module['stackAlloc'] = stackAlloc;
+Module['wasmTable'] = wasmTable;
 Module['ccall'] = ccall;
 Module['cwrap'] = cwrap;
+Module['getValue'] = getValue;
 var missingLibrarySymbols = [
   'writeI53ToI64',
   'writeI53ToI64Clamped',
@@ -1343,7 +1437,6 @@ var missingLibrarySymbols = [
   'getTempRet0',
   'setTempRet0',
   'zeroMemory',
-  'exitJS',
   'getHeapMax',
   'growMemory',
   'strError',
@@ -1361,12 +1454,8 @@ var missingLibrarySymbols = [
   'autoResumeAudioContext',
   'getDynCaller',
   'dynCall',
-  'handleException',
-  'keepRuntimeAlive',
   'runtimeKeepalivePush',
   'runtimeKeepalivePop',
-  'callUserCallback',
-  'maybeExit',
   'asmjsMangle',
   'asyncLoad',
   'alignMemory',
@@ -1512,6 +1601,22 @@ var missingLibrarySymbols = [
   'writeAsciiToMemory',
   'demangle',
   'stackTrace',
+  '_wasmWorkersID',
+  '_wasmWorkerPostFunction1',
+  '_wasmWorkerPostFunction2',
+  '_wasmWorkerPostFunction3',
+  'EmAudioCounter',
+  'emscriptenRegisterAudioObject',
+  'emscriptenGetAudioObject',
+  'emscriptenGetContextQuantumSize',
+  '_EmAudioDispatchProcessorCallback',
+  'emscripten_audio_worklet_post_function_1',
+  'emscripten_audio_worklet_post_function_2',
+  'emscripten_audio_worklet_post_function_3',
+  'fetchDeleteCachedData',
+  'fetchLoadCachedData',
+  'fetchCacheData',
+  'fetchXHR',
 ];
 missingLibrarySymbols.forEach(missingLibrarySymbol)
 
@@ -1530,10 +1635,8 @@ var unexportedSymbols = [
   'INT53_MAX',
   'INT53_MIN',
   'bigintToI53Checked',
-  'stackSave',
-  'stackRestore',
-  'stackAlloc',
   'ptrToString',
+  'exitJS',
   'abortOnCannotGrowMemory',
   'ENV',
   'ERRNO_CODES',
@@ -1544,7 +1647,10 @@ var unexportedSymbols = [
   'warnOnce',
   'readEmAsmArgsArray',
   'jstoi_s',
-  'wasmTable',
+  'handleException',
+  'keepRuntimeAlive',
+  'callUserCallback',
+  'maybeExit',
   'noExitRuntime',
   'addOnPreRun',
   'addOnPostRun',
@@ -1552,7 +1658,6 @@ var unexportedSymbols = [
   'freeTableIndexes',
   'functionsInTableMap',
   'setValue',
-  'getValue',
   'PATH',
   'PATH_FS',
   'UTF8Decoder',
@@ -1613,6 +1718,14 @@ var unexportedSymbols = [
   'allocateUTF8OnStack',
   'print',
   'printErr',
+  '_wasmWorkers',
+  '_wasmWorkerDelayedMessageQueue',
+  '_wasmWorkerAppendToQueue',
+  '_wasmWorkerRunPostMessage',
+  '_wasmWorkerInitializeRuntime',
+  'EmAudio',
+  'emscriptenDestroyAudioContext',
+  'Fetch',
 ];
 unexportedSymbols.forEach(unexportedRuntimeSymbol);
 
@@ -1633,6 +1746,12 @@ function run() {
 
   if (runDependencies > 0) {
     dependenciesFulfilled = run;
+    return;
+  }
+
+  if ((ENVIRONMENT_IS_WASM_WORKER)) {
+    readyPromiseResolve(Module);
+    initRuntime();
     return;
   }
 
@@ -1752,4 +1871,5 @@ for (const prop of Object.keys(Module)) {
 }
 );
 })();
+globalThis.AudioWorkletModule = Module;
 export default Module;

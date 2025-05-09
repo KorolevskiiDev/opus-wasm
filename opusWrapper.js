@@ -1,22 +1,24 @@
 import createOpusModule from './opusCodec.js';
 
-async function initializeOpus() {
-    return await createOpusModule();
-}
+export const OPUS_APPLICATION_VOIP = 2049;
+export const OPUS_APPLICATION_AUDIO = 2048;
+export const OPUS_APPLICATION_RESTRICTED_LOWDELAY = 2051;
 
-export async function createEncoder(sampleRate, channels, application) {
-    const OpusModule = await initializeOpus();
-    // Allocate a pointer for error reporting if needed
+export async function createEncoder(wasmBinary, sampleRate, frameSize, channels, application) {
+    const OpusModule = await createOpusModule({
+        wasmBinary: wasmBinary,
+        locateFile: (filename) => {
+            console.log("Trying to locate file: ", filename);
+            return filename;
+        }
+    });
+
     const errPtr = OpusModule._malloc(4);
-    // Create encoder; note the return type is a pointer (number)
-    const encoderPtr = OpusModule.ccall(
-        'opus_encoder_create', // function name in C
-        'number',              // return type
-        ['number', 'number', 'number', 'number'],  // argument types
-        [sampleRate, channels, application, errPtr]
-    );
-    // Retrieve error value (if desired) and free temporary memory
-    const err = OpusModule.getValue(errPtr, 'i32');
+    console.log("OpusModule creating encoder with settings: ", { sampleRate, channels, application, errPtr });
+
+    const encoderPtr = OpusModule._opus_encoder_create(sampleRate, channels, application, errPtr);
+
+    const err = OpusModule.getValue(errPtr);
     OpusModule._free(errPtr);
 
     if (err !== 0) {
@@ -28,17 +30,25 @@ export async function createEncoder(sampleRate, channels, application) {
         module: OpusModule,
         encode: (pcmData) => {
             const pcmPtr = OpusModule._malloc(pcmData.length * pcmData.BYTES_PER_ELEMENT);
-            OpusModule.HEAP16.set(pcmData, pcmPtr / pcmData.BYTES_PER_ELEMENT);
+            OpusModule.HEAPF32.set(pcmData, pcmPtr / 4); // Correct offset
 
             const maxOutputBytes = 4000; // Adjust based on expected output size
             const outputPtr = OpusModule._malloc(maxOutputBytes);
 
-            const encodedBytes = OpusModule.ccall(
-                'opus_encode',
-                'number',
-                ['number', 'number', 'number', 'number', 'number', 'number'],
-                [encoderPtr, pcmPtr, pcmData.length / channels, outputPtr, maxOutputBytes]
-            );
+            const expectedLength = frameSize * channels;
+            if (pcmData.length !== expectedLength) {
+                console.error("Invalid pcmData length:", pcmData.length, "expected:", expectedLength);
+                return new Uint8Array(0);
+            }
+
+            const encodedBytes = OpusModule._opus_encode_float(encoderPtr, pcmPtr, frameSize, outputPtr, maxOutputBytes);
+
+            if (encodedBytes < 0) {
+                console.error("Encoding failed with error:", OpusModule._opus_strerror(encodedBytes));
+                OpusModule._free(pcmPtr);
+                OpusModule._free(outputPtr);
+                return new Uint8Array(0);
+            }
 
             const encodedData = new Uint8Array(OpusModule.HEAPU8.subarray(outputPtr, outputPtr + encodedBytes));
 
@@ -48,45 +58,48 @@ export async function createEncoder(sampleRate, channels, application) {
             return encodedData;
         },
         destroy: () => {
-            OpusModule.ccall('opus_encoder_destroy', null, ['number'], [encoderPtr]);
+            OpusModule._opus_encoder_destroy(encoderPtr);
         },
     };
 }
 
-export async function createDecoder(sampleRate, channels) {
-    const OpusModule = await initializeOpus();
+export async function createDecoder(wasmBinary, sampleRate, frameSize, channels) {
+    const OpusModule = await createOpusModule({
+        wasmBinary: wasmBinary,
+        locateFile: (filename) => {
+            console.log("Trying to locate file: ", filename);
+            return filename;
+        }
+    });
+
     const errPtr = OpusModule._malloc(4);
-    const decoderPtr = OpusModule.ccall(
-        'opus_decoder_create',
-        'number',
-        ['number', 'number', 'number'],
-        [sampleRate, channels, errPtr]
-    );
-    const err = OpusModule.getValue(errPtr, 'i32');
+    const decoderPtr = OpusModule._opus_decoder_create(sampleRate, channels, errPtr);
+    const err = OpusModule.getValue(errPtr);
     OpusModule._free(errPtr);
 
     if (err !== 0) {
-        throw new Error(`Opus decoder creation failed: error code ${err}`);
+        throw new Error(`Opus decoder creation failed: error code ${OpusModule._opus_strerror(err)}`);
     }
 
     return {
         decoderPtr,
         module: OpusModule,
         decode: (encodedData) => {
-            const encodedPtr = OpusModule._malloc(encodedData.length);
+            const encodedPtr = OpusModule._malloc(encodedData.length * encodedData.BYTES_PER_ELEMENT);
             OpusModule.HEAPU8.set(encodedData, encodedPtr);
 
-            const maxSamples = 120 * sampleRate / 1000 * channels; // 120ms frame size
-            const pcmPtr = OpusModule._malloc(maxSamples * 2); // Int16Array, 2 bytes per sample
+            const pcmPtr = OpusModule._malloc(frameSize * 4); // Float32Array, 4 bytes per sample
 
-            const decodedSamples = OpusModule.ccall(
-                'opus_decode',
-                'number',
-                ['number', 'number', 'number', 'number', 'number', 'number'],
-                [decoderPtr, encodedPtr, encodedData.length, pcmPtr, maxSamples, 0]
-            );
+            const decodedSamples = OpusModule._opus_decode_float(decoderPtr, encodedPtr, encodedData.length, pcmPtr, frameSize, 0);
 
-            const pcmData = new Int16Array(OpusModule.HEAP16.subarray(pcmPtr / 2, pcmPtr / 2 + decodedSamples * channels));
+            if (decodedSamples < 0) {
+                console.error("Encoding failed with error:", OpusModule._opus_strerror(decodedSamples));
+                OpusModule._free(pcmPtr);
+                OpusModule._free(encodedPtr);
+                return new Uint8Array(0);
+            }
+
+            const pcmData = new Float32Array(OpusModule.HEAPF32.subarray(pcmPtr / 4, (pcmPtr / 4) + decodedSamples));
 
             OpusModule._free(encodedPtr);
             OpusModule._free(pcmPtr);
@@ -94,7 +107,7 @@ export async function createDecoder(sampleRate, channels) {
             return pcmData;
         },
         destroy: () => {
-            OpusModule.ccall('opus_decoder_destroy', null, ['number'], [decoderPtr]);
+            OpusModule._opus_decoder_destroy(decoderPtr);
         },
     };
 }

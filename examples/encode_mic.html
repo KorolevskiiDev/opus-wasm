@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Opus encoded microphone</title>
+</head>
+<body>
+    <h1>Opus encoded microphone</h1>
+    <p>Click the button to start recording.</p>
+    <button id="start">Start Recording</button>
+    <button id="stop" disabled>Stop Recording</button>
+    <audio id="audio" controls></audio>
+
+    <script src=""></script>
+    <script>
+        const startButton = document.getElementById('start');
+        const stopButton = document.getElementById('stop');
+        const audioElement = document.getElementById('audio');
+
+        let recorder;
+
+        startButton.addEventListener('click', async () => {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            recorder = new OpusRecorder(stream, { encoderPath: '' });
+            recorder.start();
+            startButton.disabled = true;
+            stopButton.disabled = false;
+        });
+
+        stopButton.addEventListener('click', async () => {
+            const blob = await recorder.stop();
+            audioElement.src = URL.createObjectURL(blob);
+            startButton.disabled = false;
+            stopButton.disabled = true;
+        });
+    </script>
+
+</body>
+</html>
